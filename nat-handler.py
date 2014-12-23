@@ -1,5 +1,31 @@
 #!/usr/bin/env python
 
+''' Serf handler for managing EC2 routes
+
+This handler should be installed on NAT instances. It relies on Serf for
+membership events from other NATs. When other NATs disappear from the cluster
+this script will attempt to reroute their traffic onto the current instance. It
+will only do this if it has quorum, that is, if a majority of the instances are
+still available.
+
+This script makes certain assumptions:
+
+    * There is a json file called /etc/nat.conf that maps the default route
+    table ID for each availability zone, as follows:
+
+        {
+            "eu-west-1a": "rtb-0e0ed06b",
+            "eu-west-1b": "rtb-090ed06c",
+            "eu-west-1c": "rtb-080ed06d"
+        }
+
+    * All NAT instances expose the role=nat tag in Serf.
+    * All NAT instances expose the az tag in Serf, containing the availability
+    zone in which it is running. For example, az=eu-west-1a.
+    * The jq json processor program is available.
+
+'''
+
 import json
 import os
 import sys
