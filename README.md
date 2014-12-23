@@ -20,14 +20,15 @@ either from EC2 userdata or your favourite config automation tool.
 #!/bin/bash -ex
 
 export REGION=eu-west-1
+export CIDR_BLOCK=10.0.0.0/16
 
 cat > /etc/nat.conf <<EOF
 {
-    "eu-west-1a": "rtb-0e0ed06b",
-    "eu-west-1b": "rtb-090ed06c",
-    "eu-west-1c": "rtb-080ed06d"
+    "eu-west-1a": "rtb-f426f091",
+    "eu-west-1b": "rtb-f426f091",
+    "eu-west-1c": "rtb-f426f091"
 }
 EOF
 
-curl -sL https://raw.githubusercontent.com/wrapp/nat/master/setup.sh | bash
+curl -sL https://raw.githubusercontent.com/wrapp/nat/master/setup.sh | bash -ex
 ```
