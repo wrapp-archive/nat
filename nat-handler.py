@@ -64,6 +64,10 @@ class Member(object):
         self.role = role
         self.tags = tags
 
+    @property
+    def az(self):
+        return self.tags['az']
+
     @classmethod
     def parse_member(cls, row):
         ''' Parses serf row and returns (hostname, ip, role, tags). '''
