@@ -1,5 +1,7 @@
 #!/bin/bash -ex
 
+apt-get update
+
 INSTANCE_ID=`curl -sL http://169.254.169.254/latest/meta-data/instance-id`
 
 # Enable ip forwarding and masquerading
@@ -9,6 +11,7 @@ sysctl -p
 iptables -t nat -A POSTROUTING -s $CIDR_BLOCK -o eth0 -j MASQUERADE
 
 # Disable source destination check
+apt-get install -y awscli
 aws ec2 modify-instance-attribute --region $REGION --instance-id $INSTANCE_ID --no-source-dest-check
 
 # Install the Serf NAT handler
@@ -16,7 +19,6 @@ curl -sL https://raw.githubusercontent.com/wrapp/nat/master/nat-handler.py > /us
 chmod a+x /usr/local/bin/nat-handler.py
 
 # Install jq
-apt-get update
 apt-get install -y jq
 
 # Configure Serf to identify itself as NAT and to run the nat handler on member events.
