@@ -8,6 +8,10 @@ this script will attempt to reroute their traffic onto the current instance. It
 will only do this if it has quorum, that is, if a majority of the instances are
 still available.
 
+Note that on re-routing, if the configuration supports elastic ip, the subnet would be
+re-routed on eth1 interface which would be associated with elastic ip otherwise it would
+default to eth0 which is public by default.
+
 This script makes certain assumptions:
 
     * There is a json file called /etc/nat.conf that maps the default route
@@ -126,10 +130,17 @@ class Rerouter(object):
     def eth2_id(self):
         return self.config.eth2_id(self.current_az)
 
+    def supports_elastic_ip(self, az):
+        return self.config.elastic_ip_allocation_id(az) != None
+
     def take_route(self, az):
+        ''' If the az supports elatcic ip, reroute on eth1 because eth1 is associated with elastic ip
+        otherwise reroute on eth0 which is also public. In both cases outward traffic to the internet will be possible.
+        '''
         route_table_id = self.config.route_table_id(az)
+        interface_id = self.eth1_id if self.supports_elastic_ip(az) else self.eth0_id
         vpc = connect_to_vpc(self.current_region)
-        vpc.replace_route(route_table_id, '0.0.0.0/0', interface_id=self.eth0_id)
+        vpc.replace_route(route_table_id, '0.0.0.0/0', interface_id=interface_id)
 
     def take_elastic_ip(self, az):
         ''' EIP fails over onto interface id if provided or instance id '''
