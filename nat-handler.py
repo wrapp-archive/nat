@@ -23,20 +23,14 @@ This script makes certain assumptions:
 
         {
             "eu-west-1a": {
-                "eth1_id": "eni-abc123",
-                "eth2_id": "eni-abc456",
                 "route_table_id": "rtb-0e0ed06b",
                 "elastic_ip_allocation_id": "eipalloc-cc618fa9"
             },
             "eu-west-1b": {
-                "eth1_id": "eni-def123",
-                "eth2_id": "eni-def456",
                 "route_table_id": "rtb-090ed06c",
                 "elastic_ip_allocation_id": "eipalloc-c5618fa0",
             },
             "eu-west-1c": {
-                "eth1_id": "eni-ghi123",
-                "eth2_id": "eni-ghi456",
                 "route_table_id": "rtb-080ed06d",
                 "elastic_ip_allocation_id": "eipalloc-c4618fa1",
             }
@@ -81,17 +75,6 @@ class Config(object):
             return entry.get('elastic_ip_allocation_id')
         return None
 
-    def eth1_id(self, az):
-        entry = self.config_dict[az]
-        if isinstance(entry, dict):
-            return entry.get('eth1_id')
-        return None
-
-    def eth2_id(self, az):
-        entry = self.config_dict[az]
-        if isinstance(entry, dict):
-            return entry.get('eth2_id')
-        return None
 
 
 class Rerouter(object):
@@ -111,43 +94,23 @@ class Rerouter(object):
     def current_region(self):
         return self.current_az[:-1]
 
-    @property
-    def eth0_id(self):
-        ec2 = connect_to_ec2(self.current_region)
-        instance = ec2.get_only_instances(instance_ids=[self.current_instance_id])[0]
-        eth0 = [i for i in instance.interfaces if i.id not in [self.eth1_id, self.eth2_id]]
-        return eth0[0].id
-
-    @property
-    def eth1_id(self):
-        return self.config.eth1_id(self.current_az)
-
-    @property
-    def eth2_id(self):
-        return self.config.eth2_id(self.current_az)
-
     def take_route(self, az):
         route_table_id = self.config.route_table_id(az)
         vpc = connect_to_vpc(self.current_region)
-        vpc.replace_route(route_table_id, '0.0.0.0/0', interface_id=self.eth0_id)
+        vpc.replace_route(route_table_id, '0.0.0.0/0', instance_id=self.current_instance_id)
 
     def take_elastic_ip(self, az):
-        ''' EIP fails over onto interface id if provided or instance id '''
         elastic_ip_allocation_id = self.config.elastic_ip_allocation_id(az)
         if elastic_ip_allocation_id:
             ec2 = connect_to_ec2(self.current_region)
-            interface_id = self.eth1_id if az == self.current_az else self.eth2_id
-            if interface_id:
-                ec2.associate_address(network_interface_id=interface_id,
-                                      allocation_id=elastic_ip_allocation_id, allow_reassociation=True)
-            else:
-                ec2.associate_address(self.current_instance_id,
-                                      allocation_id=elastic_ip_allocation_id, allow_reassociation=True)
+            ec2.associate_address(
+                    self.current_instance_id, allocation_id=elastic_ip_allocation_id)
 
     def __call__(self, az=None):
         az = az or self.current_az
         self.take_route(az)
         self.take_elastic_ip(az)
+
 
 
 class Quorum(object):
