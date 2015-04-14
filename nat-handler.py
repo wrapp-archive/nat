@@ -8,6 +8,10 @@ this script will attempt to reroute their traffic onto the current instance. It
 will only do this if it has quorum, that is, if a majority of the instances are
 still available.
 
+Note that on re-routing, if the configuration supports elastic ip, the subnet would be
+re-routed on eth1 interface which would be associated with elastic ip otherwise it would
+default to eth0 which is public by default.
+
 This script makes certain assumptions:
 
     * There is a json file called /etc/nat.conf that maps the default route
@@ -23,14 +27,20 @@ This script makes certain assumptions:
 
         {
             "eu-west-1a": {
+                "eth1_id": "eni-abc123",
+                "eth2_id": "eni-abc456",
                 "route_table_id": "rtb-0e0ed06b",
                 "elastic_ip_allocation_id": "eipalloc-cc618fa9"
             },
             "eu-west-1b": {
+                "eth1_id": "eni-def123",
+                "eth2_id": "eni-def456",
                 "route_table_id": "rtb-090ed06c",
                 "elastic_ip_allocation_id": "eipalloc-c5618fa0",
             },
             "eu-west-1c": {
+                "eth1_id": "eni-ghi123",
+                "eth2_id": "eni-ghi456",
                 "route_table_id": "rtb-080ed06d",
                 "elastic_ip_allocation_id": "eipalloc-c4618fa1",
             }
@@ -46,11 +56,12 @@ This script makes certain assumptions:
 import json
 import os
 import sys
+import time
 
 from boto.ec2 import connect_to_region as connect_to_ec2
 from boto.vpc import connect_to_region as connect_to_vpc
 from boto.utils import get_instance_metadata
-from subprocess import call
+from subprocess import call, check_output
 
 
 NAT_CONFIG = '/etc/nat.conf'
@@ -75,6 +86,11 @@ class Config(object):
             return entry.get('elastic_ip_allocation_id')
         return None
 
+    def eth1_id(self, az):
+        entry = self.config_dict[az]
+        if isinstance(entry, dict):
+            return entry.get('eth1_id')
+        return None
 
 
 class Rerouter(object):
@@ -94,23 +110,59 @@ class Rerouter(object):
     def current_region(self):
         return self.current_az[:-1]
 
+    @property
+    def eth0_id(self):
+        ec2 = connect_to_ec2(self.current_region)
+        instance = ec2.get_only_instances(instance_ids=[self.current_instance_id])[0]
+        eth0 = [i for i in instance.interfaces if i.id != self.eth1_id]
+        return eth0[0].id
+
+    @property
+    def eth1_id(self):
+        return self.config.eth1_id(self.current_az)
+
+    def supports_elastic_ip(self, az):
+        return self.config.elastic_ip_allocation_id(az) != None
+
     def take_route(self, az):
         route_table_id = self.config.route_table_id(az)
         vpc = connect_to_vpc(self.current_region)
-        vpc.replace_route(route_table_id, '0.0.0.0/0', instance_id=self.current_instance_id)
+        vpc.replace_route(route_table_id, '0.0.0.0/0', interface_id=self.eth0_id)
 
     def take_elastic_ip(self, az):
         elastic_ip_allocation_id = self.config.elastic_ip_allocation_id(az)
         if elastic_ip_allocation_id:
             ec2 = connect_to_ec2(self.current_region)
-            ec2.associate_address(
-                    self.current_instance_id, allocation_id=elastic_ip_allocation_id)
+            interface_id = self.eth0_id if az == self.current_az else self.eth1_id
+            ec2.associate_address(network_interface_id=interface_id,
+                                  allocation_id=elastic_ip_allocation_id, allow_reassociation=True)
+
+    def detach_interface(self):
+        ec2 = connect_to_ec2(self.current_region)
+        interface = ec2.get_all_network_interfaces(filters={'network_interface_id': self.eth1_id})
+        if interface and interface[0].status == 'in-use':
+            interface[0].detach(True)
+
+    def attach_interface(self):
+        device_index = 1
+        ec2 = connect_to_ec2(self.current_region)
+        interface = ec2.get_all_network_interfaces(filters={'network_interface_id': self.eth1_id})
+        if interface and interface[0].status == 'available':
+            ec2.attach_network_interface(self.eth1_id, self.current_instance_id, device_index)
+            while True:
+                call("ifdown --force eth1 2> /dev/null && ifup --force eth1", shell=True)
+                dev = check_output('ifconfig | grep -o eth1 || echo ""', shell=True).strip()
+                if dev == "eth1":
+                    print 'eth1 is up'
+                    break
+                else:
+                    print 'eth1 is not up. Retrying ...'
+                    time.sleep(1)
 
     def __call__(self, az=None):
         az = az or self.current_az
         self.take_route(az)
         self.take_elastic_ip(az)
-
 
 
 class Quorum(object):
@@ -172,10 +224,12 @@ def main():
     if quorum():
         if event == 'member-join':
             reroute()
+            reroute.detach_interface()
         elif event in ['member-leave', 'member-failed']:
             members = map(SerfMember.parse, sys.stdin.readlines())
             nats = [x for x in members if x.role == 'nat']
             for nat in nats:
+                reroute.attach_interface()
                 reroute(nat.az)
 
 
