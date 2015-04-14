@@ -221,12 +221,16 @@ def main():
     logger.addHandler(hdlr) 
     logger.setLevel(logging.DEBUG)
 
-    with open(NAT_CONFIG) as f:
-        config = Config(json.load(f))
-
-    event = os.environ['SERF_EVENT']
-    quorum = Quorum(config)
-    reroute = Rerouter(config)
+    logger.info("Serf-handler called ...")
+    try:
+        with open(NAT_CONFIG) as f:
+            config = Config(json.load(f))
+    
+        event = os.environ['SERF_EVENT']
+        quorum = Quorum(config)
+        reroute = Rerouter(config)
+    except Exception as ex:
+        logger.error("Error: %s" % ex.message)
 
     try:
         if quorum():
