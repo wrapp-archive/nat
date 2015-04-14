@@ -57,6 +57,7 @@ import json
 import os
 import sys
 import time
+import logging
 
 from boto.ec2 import connect_to_region as connect_to_ec2
 from boto.vpc import connect_to_region as connect_to_vpc
@@ -65,7 +66,6 @@ from subprocess import call, check_output
 
 
 NAT_CONFIG = '/etc/nat.conf'
-
 
 class Config(object):
     def __init__(self, config_dict):
@@ -214,6 +214,13 @@ class SerfMember(object):
 
 
 def main():
+    logger = logging.getLogger('serf-handler')
+    hdlr = logging.FileHandler('/var/log/serf-handler.log')
+    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
+    hdlr.setFormatter(formatter)
+    logger.addHandler(hdlr) 
+    logger.setLevel(logging.DEBUG)
+
     with open(NAT_CONFIG) as f:
         config = Config(json.load(f))
 
@@ -221,17 +228,23 @@ def main():
     quorum = Quorum(config)
     reroute = Rerouter(config)
 
-    if quorum():
-        if event == 'member-join':
-            reroute()
-            reroute.detach_interface()
-        elif event in ['member-leave', 'member-failed']:
-            members = map(SerfMember.parse, sys.stdin.readlines())
-            nats = [x for x in members if x.role == 'nat']
-            for nat in nats:
-                reroute.attach_interface()
-                reroute(nat.az)
-
+    try:
+        if quorum():
+            if event == 'member-join':
+                reroute()
+                logger.info("Re-route done")
+                reroute.detach_interface()
+                logger.info("Detach interface done")
+            elif event in ['member-leave', 'member-failed']:
+                members = map(SerfMember.parse, sys.stdin.readlines())
+                nats = [x for x in members if x.role == 'nat']
+                for nat in nats:
+                    reroute.attach_interface()
+                    logger.info("Failover [%s] attach interface done" % nat.az)
+                    reroute(nat.az)
+                    logger.info("Failover [%s] re-route done" % nat.az)
+    except Exception as ex:
+        logger.error("Error on event [%s]: %s" % (event, ex.message))
 
 if __name__ == '__main__':
     main()
