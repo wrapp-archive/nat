@@ -56,11 +56,12 @@ This script makes certain assumptions:
 import json
 import os
 import sys
+import time
 
 from boto.ec2 import connect_to_region as connect_to_ec2
 from boto.vpc import connect_to_region as connect_to_vpc
 from boto.utils import get_instance_metadata
-from subprocess import call
+from subprocess import call, check_output
 
 
 NAT_CONFIG = '/etc/nat.conf'
@@ -91,12 +92,6 @@ class Config(object):
             return entry.get('eth1_id')
         return None
 
-    def eth2_id(self, az):
-        entry = self.config_dict[az]
-        if isinstance(entry, dict):
-            return entry.get('eth2_id')
-        return None
-
 
 class Rerouter(object):
     def __init__(self, config):
@@ -119,41 +114,50 @@ class Rerouter(object):
     def eth0_id(self):
         ec2 = connect_to_ec2(self.current_region)
         instance = ec2.get_only_instances(instance_ids=[self.current_instance_id])[0]
-        eth0 = [i for i in instance.interfaces if i.id not in [self.eth1_id, self.eth2_id]]
+        eth0 = [i for i in instance.interfaces if i.id != self.eth1_id]
         return eth0[0].id
 
     @property
     def eth1_id(self):
         return self.config.eth1_id(self.current_az)
 
-    @property
-    def eth2_id(self):
-        return self.config.eth2_id(self.current_az)
-
     def supports_elastic_ip(self, az):
         return self.config.elastic_ip_allocation_id(az) != None
 
     def take_route(self, az):
-        ''' If the az supports elatcic ip, reroute on eth1 because eth1 is associated with elastic ip
-        otherwise reroute on eth0 which is also public. In both cases outward traffic to the internet will be possible.
-        '''
         route_table_id = self.config.route_table_id(az)
-        interface_id = self.eth1_id if self.supports_elastic_ip(az) else self.eth0_id
         vpc = connect_to_vpc(self.current_region)
-        vpc.replace_route(route_table_id, '0.0.0.0/0', interface_id=interface_id)
+        vpc.replace_route(route_table_id, '0.0.0.0/0', interface_id=self.eth0_id)
 
     def take_elastic_ip(self, az):
-        ''' EIP fails over onto interface id if provided or instance id '''
         elastic_ip_allocation_id = self.config.elastic_ip_allocation_id(az)
         if elastic_ip_allocation_id:
             ec2 = connect_to_ec2(self.current_region)
-            interface_id = self.eth1_id if az == self.current_az else self.eth2_id
-            if interface_id:
-                ec2.associate_address(network_interface_id=interface_id,
-                                      allocation_id=elastic_ip_allocation_id, allow_reassociation=True)
-            else:
-                ec2.associate_address(self.current_instance_id,
-                                      allocation_id=elastic_ip_allocation_id, allow_reassociation=True)
+            interface_id = self.eth0_id if az == self.current_az else self.eth1_id
+            ec2.associate_address(network_interface_id=interface_id,
+                                  allocation_id=elastic_ip_allocation_id, allow_reassociation=True)
+
+    def detach_interface(self):
+        ec2 = connect_to_ec2(self.current_region)
+        interface = ec2.get_all_network_interfaces(filters={'network_interface_id': self.eth1_id})
+        if interface and interface[0].status == 'in-use':
+            interface[0].detach(True)
+
+    def attach_interface(self):
+        device_index = 1
+        ec2 = connect_to_ec2(self.current_region)
+        interface = ec2.get_all_network_interfaces(filters={'network_interface_id': self.eth1_id})
+        if interface and interface[0].status == 'available':
+            ec2.attach_network_interface(self.eth1_id, self.current_instance_id, device_index)
+            while True:
+                call("ifdown --force eth1 2> /dev/null && ifup --force eth1", shell=True)
+                dev = check_output('ifconfig | grep -o eth1 || echo ""', shell=True).strip()
+                if dev == "eth1":
+                    print 'eth1 is up'
+                    break
+                else:
+                    print 'eth1 is not up. Retrying ...'
+                    time.sleep(1)
 
     def __call__(self, az=None):
         az = az or self.current_az
@@ -220,10 +224,12 @@ def main():
     if quorum():
         if event == 'member-join':
             reroute()
+            reroute.detach_interface()
         elif event in ['member-leave', 'member-failed']:
             members = map(SerfMember.parse, sys.stdin.readlines())
             nats = [x for x in members if x.role == 'nat']
             for nat in nats:
+                reroute.attach_interface()
                 reroute(nat.az)
 
 
