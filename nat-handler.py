@@ -143,7 +143,7 @@ class Rerouter(object):
         if interface and interface[0].status == 'in-use':
             interface[0].detach(True)
 
-    def attach_interface(self):
+    def attach_interface(self, logger):
         device_index = 1
         ec2 = connect_to_ec2(self.current_region)
         interface = ec2.get_all_network_interfaces(filters={'network_interface_id': self.eth1_id})
@@ -153,15 +153,17 @@ class Rerouter(object):
                 call("ifdown --force eth1 2> /dev/null && ifup --force eth1", shell=True)
                 dev = check_output('ifconfig | grep -o eth1 || echo ""', shell=True).strip()
                 if dev == "eth1":
-                    print 'eth1 is up'
+                    log(logger.info, 'eth1 is up')
                     break
                 else:
-                    print 'eth1 is not up. Retrying ...'
+                    log(logger.info, 'eth1 is not up. Retrying ...')
                     time.sleep(1)
 
-    def __call__(self, az=None):
+    def __call__(self, logger, az=None):
         az = az or self.current_az
+        log(logger.info, 'Taking route from az=%s' % az)
         self.take_route(az)
+        log(logger.info, 'Taking elastic ip from az=%s' % az)
         self.take_elastic_ip(az)
 
 
@@ -212,43 +214,48 @@ class SerfMember(object):
     parse = parse_member
 
 
+def log(log_func, message, event=None):
+    log_func('[NAT-FAILOVER] event=%s, message=%s' % (event, message))
+
 
 def main():
     logger = logging.getLogger('serf-handler')
-    hdlr = logging.FileHandler('/var/log/serf-handler.log')
-    formatter = logging.Formatter('%(asctime)s %(levelname)s %(message)s')
-    hdlr.setFormatter(formatter)
+    hdlr = logging.handlers.SysLogHandler(address='/dev/log')
     logger.addHandler(hdlr) 
     logger.setLevel(logging.DEBUG)
 
-    logger.info("Serf-handler called ...")
+    with open(NAT_CONFIG) as f:
+        config = Config(json.load(f))
+    event = os.environ['SERF_EVENT']
+    log(logger.info, "Serf-handler called", event=event)
+
     try:
-        with open(NAT_CONFIG) as f:
-            config = Config(json.load(f))
-    
-        event = os.environ['SERF_EVENT']
         quorum = Quorum(config)
         reroute = Rerouter(config)
     except Exception as ex:
-        logger.error("Error: %s" % ex.message)
+        log(logger.error, "Exception on init: %s" % ex, event=event)
+        raise ex
 
     try:
         if quorum():
             if event == 'member-join':
-                reroute()
-                logger.info("Re-route done")
+                reroute(logger)
+                log(logger.info, 'Re-route done', event=event)
                 reroute.detach_interface()
-                logger.info("Detach interface done")
+                log(logger.info, 'Detach interface done', event=event)
             elif event in ['member-leave', 'member-failed']:
                 members = map(SerfMember.parse, sys.stdin.readlines())
                 nats = [x for x in members if x.role == 'nat']
                 for nat in nats:
-                    reroute.attach_interface()
-                    logger.info("Failover [%s] attach interface done" % nat.az)
-                    reroute(nat.az)
-                    logger.info("Failover [%s] re-route done" % nat.az)
+                    reroute.attach_interface(logger)
+                    log(logger.info, 'Attach interface for az=%s done' % nat.az, event=event)
+                    reroute(logger, az=nat.az)
+                    log(logger.info, 'Re-route done for az=%s done' % nat.az, event=event)
+        else:
+            log(logger.info, 'No quorum. Cannot failover', event=event)
     except Exception as ex:
-        logger.error("Error on event [%s]: %s" % (event, ex.message))
+        log(logger.error, 'Exception in failover logic: %s' % ex, event=event)
+
 
 if __name__ == '__main__':
     main()
