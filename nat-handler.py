@@ -246,7 +246,7 @@ def main():
         reroute = Rerouter(config)
         nats = get_nats_from_serf_event()
         if not nats:
-            log(logger.info, 'No nat involved. Ignoring.')
+            log('No nat involved. Ignoring.')
             return
 
         if not quorum():
