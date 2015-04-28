@@ -66,6 +66,8 @@ from subprocess import call, check_output
 
 
 NAT_CONFIG = '/etc/nat.conf'
+logger = None
+
 
 class Config(object):
     def __init__(self, config_dict):
@@ -97,6 +99,7 @@ class Rerouter(object):
     def __init__(self, config):
         self.metadata = get_instance_metadata()
         self.config = config
+        log('Rerouter initialized')
 
     @property
     def current_instance_id(self):
@@ -143,7 +146,7 @@ class Rerouter(object):
         if interface and interface[0].status == 'in-use':
             interface[0].detach(True)
 
-    def attach_interface(self, logger):
+    def attach_interface(self):
         device_index = 1
         ec2 = connect_to_ec2(self.current_region)
         interface = ec2.get_all_network_interfaces(filters={'network_interface_id': self.eth1_id})
@@ -153,23 +156,24 @@ class Rerouter(object):
                 call("ifdown --force eth1 2> /dev/null && ifup --force eth1", shell=True)
                 dev = check_output('ifconfig | grep -o eth1 || echo ""', shell=True).strip()
                 if dev == "eth1":
-                    log(logger.info, 'eth1 is up')
+                    log('eth1 is up')
                     break
                 else:
-                    log(logger.info, 'eth1 is not up. Retrying ...')
+                    log('eth1 is not up. Retrying ...')
                     time.sleep(1)
 
-    def __call__(self, logger, az=None):
+    def __call__(self, az=None):
         az = az or self.current_az
-        log(logger.info, 'Taking route from az=%s' % az)
+        log('Taking route from az=%s' % az)
         self.take_route(az)
-        log(logger.info, 'Taking elastic ip from az=%s' % az)
+        log('Taking elastic ip from az=%s' % az)
         self.take_elastic_ip(az)
 
 
 class Quorum(object):
     def __init__(self, config):
         self.config = config
+        log('Quorum initialized')
 
     def quorum(self):
         ''' Returns True if the current nat belongs to the quorum. '''
@@ -214,47 +218,45 @@ class SerfMember(object):
     parse = parse_member
 
 
-def log(log_func, message, event=None):
-    log_func('[NAT-FAILOVER] event=%s, message=%s' % (event, message))
+def log(message, level=logging.INFO):
+    global logger
+    if not logger:
+        logger = logging.getLogger('serf-handler')
+        logger.addHandler(logging.handlers.SysLogHandler(address='/dev/log')) 
+        logger.setLevel(logging.DEBUG)
+
+    event = os.environ['SERF_EVENT']
+    logger.log(level, '[NAT-FAILOVER] event=%s, message=%s' % (event, message))
 
 
 def main():
-    logger = logging.getLogger('serf-handler')
-    hdlr = logging.handlers.SysLogHandler(address='/dev/log')
-    logger.addHandler(hdlr) 
-    logger.setLevel(logging.DEBUG)
-
     with open(NAT_CONFIG) as f:
         config = Config(json.load(f))
     event = os.environ['SERF_EVENT']
-    log(logger.info, "Serf-handler called", event=event)
+    log("Serf-handler called")
 
     try:
         quorum = Quorum(config)
         reroute = Rerouter(config)
-    except Exception as ex:
-        log(logger.error, "Exception on init: %s" % ex, event=event)
-        raise ex
 
-    try:
         if quorum():
             if event == 'member-join':
-                reroute(logger)
-                log(logger.info, 'Re-route done', event=event)
+                reroute()
+                log('Re-route done')
                 reroute.detach_interface()
-                log(logger.info, 'Detach interface done', event=event)
+                log('Detach interface done')
             elif event in ['member-leave', 'member-failed']:
                 members = map(SerfMember.parse, sys.stdin.readlines())
                 nats = [x for x in members if x.role == 'nat']
                 for nat in nats:
-                    reroute.attach_interface(logger)
-                    log(logger.info, 'Attach interface for az=%s done' % nat.az, event=event)
-                    reroute(logger, az=nat.az)
-                    log(logger.info, 'Re-route done for az=%s done' % nat.az, event=event)
+                    reroute.attach_interface()
+                    log('Attach interface for az=%s done' % nat.az)
+                    reroute(az=nat.az)
+                    log('Re-route done for az=%s done' % nat.az)
         else:
-            log(logger.info, 'No quorum. Cannot failover', event=event)
+            log('No quorum. Cannot failover')
     except Exception as ex:
-        log(logger.error, 'Exception in failover logic: %s' % ex, event=event)
+        log('Exception in failover logic: %s' % ex, level=logging.ERROR)
 
 
 if __name__ == '__main__':
