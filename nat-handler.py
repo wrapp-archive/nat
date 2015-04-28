@@ -229,6 +229,12 @@ def log(message, level=logging.INFO):
     logger.log(level, '[NAT-FAILOVER] event=%s, message=%s' % (event, message))
 
 
+def get_nats_from_serf_event():
+    members = map(SerfMember.parse, sys.stdin.readlines())
+    nats = [x for x in members if x.role == 'nat']
+    return nats
+
+
 def main():
     with open(NAT_CONFIG) as f:
         config = Config(json.load(f))
@@ -238,23 +244,26 @@ def main():
     try:
         quorum = Quorum(config)
         reroute = Rerouter(config)
+        nats = get_nats_from_serf_event()
+        if not nats:
+            log(logger.info, 'No nat involved. Ignoring.')
+            return
 
-        if quorum():
-            if event == 'member-join':
-                reroute()
-                log('Re-route done')
-                reroute.detach_interface()
-                log('Detach interface done')
-            elif event in ['member-leave', 'member-failed']:
-                members = map(SerfMember.parse, sys.stdin.readlines())
-                nats = [x for x in members if x.role == 'nat']
-                for nat in nats:
-                    reroute.attach_interface()
-                    log('Attach interface for az=%s done' % nat.az)
-                    reroute(az=nat.az)
-                    log('Re-route done for az=%s done' % nat.az)
-        else:
+        if not quorum():
             log('No quorum. Cannot failover')
+            return
+
+        if event == 'member-join':
+            reroute()
+            log('Re-route done')
+            reroute.detach_interface()
+            log('Detach interface done')
+        elif event in ['member-leave', 'member-failed']:
+            for nat in nats:
+                reroute.attach_interface()
+                log('Attach interface for az=%s done' % nat.az)
+                reroute(az=nat.az)
+                log('Re-route done for az=%s done' % nat.az)
     except Exception as ex:
         log('Exception in failover logic: %s' % ex, level=logging.ERROR)
 
