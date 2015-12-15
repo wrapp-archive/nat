@@ -65,7 +65,7 @@ from boto.utils import get_instance_metadata
 from subprocess import call, check_output
 
 
-NAT_CONFIG = '/etc/nat.conf'
+ROLE = '-'.join(os.environ['CLUSTER'].split('-')[1:])
 logger = None
 
 
@@ -128,11 +128,15 @@ class Rerouter(object):
         return self.config.elastic_ip_allocation_id(az) != None
 
     def take_route(self, az):
+        if ROLE != 'nat':
+            return
         route_table_id = self.config.route_table_id(az)
         vpc = connect_to_vpc(self.current_region)
         vpc.replace_route(route_table_id, '0.0.0.0/0', interface_id=self.eth0_id)
 
     def take_elastic_ip(self, az):
+        if ROLE != 'eip':
+            return
         elastic_ip_allocation_id = self.config.elastic_ip_allocation_id(az)
         if elastic_ip_allocation_id:
             ec2 = connect_to_ec2(self.current_region)
@@ -141,12 +145,16 @@ class Rerouter(object):
                                   allocation_id=elastic_ip_allocation_id, allow_reassociation=True)
 
     def detach_interface(self):
+        if ROLE != 'eip':
+            return
         ec2 = connect_to_ec2(self.current_region)
         interface = ec2.get_all_network_interfaces(filters={'network_interface_id': self.eth1_id})
         if interface and interface[0].status == 'in-use':
             interface[0].detach(True)
 
     def attach_interface(self):
+        if ROLE != 'eip':
+            return
         device_index = 1
         ec2 = connect_to_ec2(self.current_region)
         interface = ec2.get_all_network_interfaces(filters={'network_interface_id': self.eth1_id})
@@ -183,7 +191,7 @@ class Quorum(object):
 
     def alive(self, n):
         ''' Returns True if at least n nats are alive. '''
-        cmd = "serf members -tag role=nat -status=alive -format json | jq '.members | length >= %s' | grep true" % n
+        cmd = "serf members -tag role=%s -status=alive -format json | jq '.members | length >= %s' | grep true" % (ROLE, n)
         res = call(cmd, shell=True)
         return res == 0
 
@@ -222,21 +230,29 @@ def log(message, level=logging.INFO):
     global logger
     if not logger:
         logger = logging.getLogger('serf-handler')
-        logger.addHandler(logging.handlers.SysLogHandler(address='/dev/log')) 
+        logger.addHandler(logging.handlers.SysLogHandler(address='/dev/log'))
         logger.setLevel(logging.DEBUG)
 
     event = os.environ['SERF_EVENT']
-    logger.log(level, '[NAT-FAILOVER] event=%s, message=%s' % (event, message))
+    logger.log(level, '[%s-FAILOVER] event=%s, message=%s' % (ROLE, event, message))
 
 
-def get_nats_from_serf_event():
+def get_serf_members():
     members = map(SerfMember.parse, sys.stdin.readlines())
-    nats = [x for x in members if x.role == 'nat']
-    return nats
+    members = [x for x in members if x.role == ROLE]
+    return members
 
 
 def main():
-    with open(NAT_CONFIG) as f:
+    if ROLE == 'nat':
+        config_location = '/etc/nat.conf'
+    elif ROLE == 'eip':
+        config_location = '/etc/eip.conf'
+    else:
+        log("Invalid role " % ROLE)
+        raise("Invalid role to run nat-and-eip-handler.py script")
+
+    with open(config_location) as f:
         config = Config(json.load(f))
     event = os.environ['SERF_EVENT']
     log("Serf-handler called")
@@ -244,9 +260,9 @@ def main():
     try:
         quorum = Quorum(config)
         reroute = Rerouter(config)
-        nats = get_nats_from_serf_event()
-        if not nats:
-            log('No nat involved. Ignoring.')
+        members = get_serf_members()
+        if not members:
+            log('No members involved. Ignoring.')
             return
 
         if not quorum():
@@ -259,11 +275,11 @@ def main():
             reroute.detach_interface()
             log('Detach interface done')
         elif event in ['member-leave', 'member-failed']:
-            for nat in nats:
+            for member in members:
                 reroute.attach_interface()
-                log('Attach interface for az=%s done' % nat.az)
-                reroute(az=nat.az)
-                log('Re-route done for az=%s done' % nat.az)
+                log('Attach interface for az=%s done' % member.az)
+                reroute(az=member.az)
+                log('Re-route done for az=%s done' % member.az)
     except Exception as ex:
         log('Exception in failover logic: %s' % ex, level=logging.ERROR)
 
